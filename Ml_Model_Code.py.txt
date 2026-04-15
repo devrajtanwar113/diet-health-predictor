@@ -1,0 +1,308 @@
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import warnings
+import joblib
+import os
+
+warnings.filterwarnings('ignore')
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+print("✅ Libraries imported successfully")
+print(f"TensorFlow version: {tf.__version__}")
+
+print("\n📂 Loading dataset...")
+
+try:
+    from google.colab import files
+    print("Please upload your food_impact_india.csv file...")
+    uploaded = files.upload()
+    filename = list(uploaded.keys())[0]
+    df = pd.read_csv(filename)
+    print(f"✅ Dataset loaded: {df.shape[0]} rows, {df.shape[1]} columns")
+except:
+    try:
+        df = pd.read_csv('food_impact_india.csv')
+        print(f"✅ Dataset loaded: {df.shape[0]} rows, {df.shape[1]} columns")
+    except:
+        print("⚠️ CSV file not found. Please upload the file.")
+        raise FileNotFoundError("food_impact_india.csv not found")
+
+def preprocess_data(df):
+    df_processed = df.copy()
+    
+    id_cols = ['Person_ID', 'Participant_ID', 'ID', 'Patient_ID']
+    for col in id_cols:
+        if col in df_processed.columns:
+            df_processed = df_processed.drop(col, axis=1)
+            print(f"   Dropped: {col}")
+    
+    if 'Health_Impact' in df_processed.columns:
+        health_map = {'Positive': 0, 'Neutral': 1, 'Negative': 2}
+        df_processed['health_outcome'] = df_processed['Health_Impact'].map(health_map)
+        df_processed = df_processed.drop('Health_Impact', axis=1)
+        print("   Mapped Health_Impact to health_outcome")
+    
+    elif 'Health_Score' in df_processed.columns:
+        q33 = df_processed['Health_Score'].quantile(0.33)
+        q66 = df_processed['Health_Score'].quantile(0.66)
+        
+        def categorize(score):
+            if score <= q33:
+                return 2
+            elif score <= q66:
+                return 1
+            else:
+                return 0
+        
+        df_processed['health_outcome'] = df_processed['Health_Score'].apply(categorize)
+        df_processed = df_processed.drop('Health_Score', axis=1)
+        print(f"   Categorized Health_Score into 3 classes (thresholds: {q33:.2f}, {q66:.2f})")
+    
+    categorical_cols = df_processed.select_dtypes(include=['object']).columns.tolist()
+    if 'health_outcome' in categorical_cols:
+        categorical_cols.remove('health_outcome')
+    
+    label_encoders = {}
+    for col in categorical_cols:
+        le = LabelEncoder()
+        df_processed[f'{col}_encoded'] = le.fit_transform(df_processed[col].astype(str))
+        label_encoders[col] = le
+        df_processed = df_processed.drop(col, axis=1)
+        print(f"   Encoded: {col}")
+    
+    return df_processed, label_encoders
+
+print("\n🔄 Preprocessing data...")
+df_processed, label_encoders = preprocess_data(df)
+print(f"✅ Final dataset shape: {df_processed.shape}")
+
+print("\n📊 Preparing features...")
+
+feature_cols = [col for col in df_processed.columns if col != 'health_outcome']
+X = df_processed[feature_cols]
+y = df_processed['health_outcome']
+
+n_classes = len(np.unique(y))
+print(f"✅ Number of classes: {n_classes}")
+print(f"   Class distribution: {dict(y.value_counts())}")
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+y_train_cat = keras.utils.to_categorical(y_train, num_classes=n_classes)
+y_test_cat = keras.utils.to_categorical(y_test, num_classes=n_classes)
+
+print(f"✅ Training set: {X_train_scaled.shape[0]} samples")
+print(f"✅ Test set: {X_test_scaled.shape[0]} samples")
+
+print("\n🧠 Building Neural Network...")
+
+input_dim = X_train_scaled.shape[1]
+
+if input_dim > 50:
+    layer_sizes = [128, 64, 32]
+elif input_dim > 20:
+    layer_sizes = [64, 32, 16]
+else:
+    layer_sizes = [32, 16, 8]
+
+model = keras.Sequential([
+    layers.Dense(layer_sizes[0], activation='relu', input_shape=(input_dim,)),
+    layers.BatchNormalization(),
+    layers.Dropout(0.3),
+    
+    layers.Dense(layer_sizes[1], activation='relu'),
+    layers.BatchNormalization(),
+    layers.Dropout(0.3),
+    
+    layers.Dense(layer_sizes[2], activation='relu'),
+    layers.BatchNormalization(),
+    layers.Dropout(0.2),
+    
+    layers.Dense(n_classes, activation='softmax')
+])
+
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=0.001),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+
+print("\n🏋️ Training model...")
+
+early_stop = keras.callbacks.EarlyStopping(
+    monitor='val_loss', patience=20, restore_best_weights=True, verbose=1
+)
+
+history = model.fit(
+    X_train_scaled, y_train_cat,
+    epochs=100,
+    batch_size=32,
+    validation_split=0.2,
+    callbacks=[early_stop],
+    verbose=1
+)
+
+print("\n📊 Evaluating model...")
+
+y_pred_proba = model.predict(X_test_scaled)
+y_pred = np.argmax(y_pred_proba, axis=1)
+accuracy = accuracy_score(y_test, y_pred)
+
+class_names = ['Healthy', 'Moderate Risk', 'High Risk'][:n_classes]
+
+print(f"\n🎯 Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
+print("\n📋 Classification Report:")
+print(classification_report(y_test, y_pred, target_names=class_names))
+
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_names, yticklabels=class_names)
+plt.title('Confusion Matrix')
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.tight_layout()
+plt.savefig('confusion_matrix.png')
+plt.show()
+
+print("\n💾 Saving model and artifacts...")
+
+model.save('diet_health_model.h5')
+joblib.dump(scaler, 'scaler.pkl')
+joblib.dump(feature_cols, 'feature_columns.pkl')
+joblib.dump(label_encoders, 'label_encoders.pkl')
+
+print("✅ Model saved as 'diet_health_model.h5'")
+print("✅ Scaler saved as 'scaler.pkl'")
+print("✅ Feature columns saved as 'feature_columns.pkl'")
+print("✅ Label encoders saved as 'label_encoders.pkl'")
+
+print("\n" + "="*50)
+print("🔮 PREDICTION FUNCTION")
+print("="*50)
+
+def predict_health(features_dict):
+    input_data = {}
+    
+    for col, encoder in label_encoders.items():
+        if col in features_dict:
+            try:
+                input_data[f'{col}_encoded'] = encoder.transform([str(features_dict[col])])[0]
+            except:
+                input_data[f'{col}_encoded'] = 0
+        else:
+            input_data[f'{col}_encoded'] = 0
+    
+    for col in feature_cols:
+        if col not in input_data:
+            if col in features_dict:
+                input_data[col] = features_dict[col]
+            else:
+                input_data[col] = 0
+    
+    input_df = pd.DataFrame([input_data])
+    input_df = input_df[feature_cols]
+    input_scaled = scaler.transform(input_df)
+    
+    prediction_proba = model.predict(input_scaled, verbose=0)
+    prediction = np.argmax(prediction_proba, axis=1)[0]
+    confidence = np.max(prediction_proba, axis=1)[0]
+    
+    outcomes = {0: "Healthy", 1: "Moderate Risk", 2: "High Risk"}
+    
+    return {
+        'prediction': outcomes[prediction],
+        'confidence': confidence,
+        'risk_level': prediction,
+        'probabilities': {
+            'Healthy': float(prediction_proba[0][0]),
+            'Moderate Risk': float(prediction_proba[0][1]) if n_classes > 1 else 0,
+            'High Risk': float(prediction_proba[0][2]) if n_classes > 2 else 0
+        }
+    }
+
+def predict_batch(dataframe):
+    result_df = dataframe.copy()
+    
+    for col, encoder in label_encoders.items():
+        if col in result_df.columns:
+            result_df[f'{col}_encoded'] = encoder.transform(result_df[col].astype(str))
+        else:
+            result_df[f'{col}_encoded'] = 0
+    
+    for col in feature_cols:
+        if col not in result_df.columns:
+            result_df[col] = 0
+    
+    X_scaled = scaler.transform(result_df[feature_cols])
+    predictions = np.argmax(model.predict(X_scaled, verbose=0), axis=1)
+    
+    outcome_map = {0: 'Healthy', 1: 'Moderate Risk', 2: 'High Risk'}
+    result_df['Predicted_Health_Outcome'] = [outcome_map[p] for p in predictions]
+    
+    return result_df
+
+print("\n🧪 Testing prediction function...")
+
+test_person = {
+    'Age': 45,
+    'BMI': 26.5,
+    'Daily_Calories': 2500,
+    'Fat_Intake_g': 70,
+    'Protein_Intake_g': 80,
+    'Carb_Intake_g': 300,
+    'Sugar_Intake_g': 50,
+    'Fiber_Intake_g': 25,
+    'Cholesterol_mg': 180,
+    'Gender': 'Female'
+}
+
+for col in feature_cols:
+    if col not in test_person and '_encoded' not in col:
+        if 'Spice' in col or 'Diet' in col or 'Exercise' in col or 'Region' in col:
+            test_person[col] = 'Medium'
+
+result = predict_health(test_person)
+print(f"\n📊 Test Prediction:")
+print(f"   Prediction: {result['prediction']}")
+print(f"   Confidence: {result['confidence']:.2%}")
+print(f"   Probabilities: Healthy: {result['probabilities']['Healthy']:.3f}, "
+      f"Moderate: {result['probabilities']['Moderate Risk']:.3f}, "
+      f"High: {result['probabilities']['High Risk']:.3f}")
+
+print("\n" + "="*50)
+print("✅ PROJECT COMPLETED SUCCESSFULLY!")
+print("="*50)
+print("\n📁 Files generated:")
+print("   1. diet_health_model.h5 - Trained model")
+print("   2. scaler.pkl - Feature scaler")
+print("   3. feature_columns.pkl - Feature list")
+print("   4. label_encoders.pkl - Categorical encoders")
+print(f"\n📊 Model Performance:")
+print(f"   Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
+print(f"   Features used: {len(feature_cols)}")
+print(f"   Classes: {n_classes}")
+print("\n🎯 How to use:")
+print("   result = predict_health({'Age': 45, 'BMI': 26.5, 'Daily_Calories': 2500, 'Gender': 'Female'})")
+print("   print(result['prediction'])")
+print("="*50)

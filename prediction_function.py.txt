@@ -1,0 +1,126 @@
+import numpy as np
+import pandas as pd
+import joblib
+import tensorflow as tf
+import warnings
+warnings.filterwarnings('ignore')
+
+def load_model(model_path='diet_health_model.h5', 
+               scaler_path='scaler.pkl',
+               features_path='feature_columns.pkl',
+               encoders_path='label_encoders.pkl'):
+    model = tf.keras.models.load_model(model_path)
+    scaler = joblib.load(scaler_path)
+    feature_cols = joblib.load(features_path)
+    label_encoders = joblib.load(encoders_path)
+    print("✅ Model and artifacts loaded successfully!")
+    return model, scaler, feature_cols, label_encoders
+
+def predict_health(features_dict, model=None, scaler=None, feature_cols=None, label_encoders=None):
+    if model is None:
+        model, scaler, feature_cols, label_encoders = load_model()
+    
+    input_data = {}
+    
+    for col, encoder in label_encoders.items():
+        if col in features_dict:
+            try:
+                input_data[f'{col}_encoded'] = encoder.transform([str(features_dict[col])])[0]
+            except:
+                input_data[f'{col}_encoded'] = 0
+        else:
+            input_data[f'{col}_encoded'] = 0
+    
+    for col in feature_cols:
+        if col not in input_data:
+            if col in features_dict:
+                input_data[col] = features_dict[col]
+            else:
+                input_data[col] = 0
+    
+    input_df = pd.DataFrame([input_data])
+    input_df = input_df[feature_cols]
+    input_scaled = scaler.transform(input_df)
+    
+    prediction_proba = model.predict(input_scaled, verbose=0)
+    prediction = np.argmax(prediction_proba, axis=1)[0]
+    confidence = np.max(prediction_proba, axis=1)[0]
+    
+    outcomes = {0: "Healthy", 1: "Moderate Risk", 2: "High Risk"}
+    
+    return {
+        'prediction': outcomes[prediction],
+        'confidence': confidence,
+        'risk_level': prediction,
+        'probabilities': {
+            'Healthy': float(prediction_proba[0][0]),
+            'Moderate Risk': float(prediction_proba[0][1]) if len(prediction_proba[0]) > 1 else 0,
+            'High Risk': float(prediction_proba[0][2]) if len(prediction_proba[0]) > 2 else 0
+        }
+    }
+
+def predict_batch(dataframe, model=None, scaler=None, feature_cols=None, label_encoders=None):
+    if model is None:
+        model, scaler, feature_cols, label_encoders = load_model()
+    
+    result_df = dataframe.copy()
+    
+    for col, encoder in label_encoders.items():
+        if col in result_df.columns:
+            result_df[f'{col}_encoded'] = encoder.transform(result_df[col].astype(str))
+        else:
+            result_df[f'{col}_encoded'] = 0
+    
+    for col in feature_cols:
+        if col not in result_df.columns:
+            result_df[col] = 0
+    
+    X_scaled = scaler.transform(result_df[feature_cols])
+    predictions = np.argmax(model.predict(X_scaled, verbose=0), axis=1)
+    
+    outcome_map = {0: 'Healthy', 1: 'Moderate Risk', 2: 'High Risk'}
+    result_df['Predicted_Health_Outcome'] = [outcome_map[p] for p in predictions]
+    
+    return result_df
+
+def get_recommendations(prediction_result):
+    risk_level = prediction_result['risk_level']
+    
+    if risk_level == 2:
+        return [
+            "⚠️ Consult a healthcare professional immediately",
+            "🥗 Start a structured diet plan with reduced calories",
+            "🏃 Begin with 30 minutes of daily moderate exercise",
+            "🍎 Increase fiber intake (vegetables, fruits, whole grains)",
+            "💧 Drink at least 2-3 liters of water daily",
+            "😴 Maintain 7-8 hours of quality sleep"
+        ]
+    elif risk_level == 1:
+        return [
+            "📈 Monitor your diet and physical activity regularly",
+            "🥦 Increase vegetable and fruit consumption",
+            "🏃 Aim for 150 minutes of moderate exercise per week",
+            "🍞 Replace refined grains with whole grains",
+            "💧 Stay hydrated with 2-3 liters of water daily"
+        ]
+    else:
+        return [
+            "✅ Maintain your current healthy lifestyle",
+            "🥗 Continue balanced nutrition with variety",
+            "🏃 Keep up with regular physical activity",
+            "💧 Stay hydrated throughout the day",
+            "😴 Maintain good sleep hygiene"
+        ]
+
+def quick_predict(**kwargs):
+    return predict_health(kwargs)
+
+if __name__ == "__main__":
+    print("="*50)
+    print("HEALTH PREDICTION FUNCTION - READY")
+    print("="*50)
+    print("\nUsage:")
+    print("  from prediction_function import predict_health")
+    print("  result = predict_health({'Age': 45, 'BMI': 26.5, 'Daily_Calories': 2500})")
+    print("  print(result['prediction'])")
+    print("="*50)
